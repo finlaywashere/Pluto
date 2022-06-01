@@ -52,6 +52,11 @@
 #define MPU_INT_PIN 8
 #define SD_CS A3
 
+#define INT2 A0
+#define INT3 A1
+#define INT4 A2
+
+
 #define MESSAGE_RETRANSMIT_TIME 1000
 
 #ifdef BME_ENABLE
@@ -89,6 +94,7 @@ int loop_count = 0;
 
 long last_ping = 0;
 long last_rec_ping = 0;
+long errors = 0; // Communication errors
 
 void setup() {
   // Initialize serial connection with sister board
@@ -323,8 +329,13 @@ void loop() {
           digitalWrite(LED1,HIGH);
           // An error has occurred with the safety computer, enter safe mode
           // TODO: Figure out what to do
-          
+          while(1); // Just lock up?
+        }else if(message[0] == CHECKSUM){
+          errors++;
         }
+      }else{
+        errors++;
+        message_status(CHECKSUM,0);
       }
     }
     delay(250);

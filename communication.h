@@ -7,9 +7,14 @@
 #define ACTION 6
 #define PING 7
 #define STARTUP 8
+#define CHECKSUM 9
+#define QUERY 10
+#define STATUS 11
+#define INFO 12
 
-#define SOURCE_FC 0
-#define SOURCE_SC 1
+#define SOURCE_FC 0 // Flight computer
+#define SOURCE_SC 1 // Safety computer
+#define SOURCE_LC 2 // Launch computer
 
 #define CODE_HW_BME 0
 #define CODE_HW_MPU 1
@@ -28,3 +33,13 @@
 #define DATA_MPU 1
 #define DATA_BME_EXT 2
 #define DATA_MPU_EXT 3
+
+#define STATUS_LAUNCH 0
+#define STATUS_READY 1
+#define STATUS_UNREADY 2
+#define STATUS_ABORT 3
+#define STATUS_TEST 4
+#define STATUS_COMMS 5
+
+#define QUERY_LAUNCH 0
+#define QUERY_INFO 1

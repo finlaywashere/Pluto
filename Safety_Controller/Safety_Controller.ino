@@ -1,8 +1,15 @@
-//#define BME_ENABLE
-//#define BME_CRITICAL
+#define BME_ENABLE
+#define BME_CRITICAL
 #define PARACHUTE_ENABLE
+#define LAUNCHER_COMMS
+#define LAUNCHER_COMMS_CRITICAL
 
 #define BATTERY_ENABLE
+
+#ifdef LAUNCHER_COMMS
+  // Note that design does support wireless comms, however its not going to be used for power reasons
+  #include <SoftwareSerial.h>
+#endif
 
 #define BATTERY_NOMINAL 4.2
 #define BATTERY_THRESHOLD 3.3
@@ -58,14 +65,26 @@
   boolean parachute_arm = false;
 #endif
 
+#ifdef LAUNCHER_COMMS
+  // Note that these pins will be connected to a RS232 converter because the controller will be too far away for TTL
+  SoftwareSerial launcher_serial (RCE,RCSN); // CE is rx and CSN is tx
+  long launcher_last_rec = 0;
+#endif
+
 boolean setup_mode = true;
 int loop_count = 0;
 long last_rec_ping = 0;
 long last_ping = 0;
+long errors = 0; // Communication errors;
+boolean on_ground = true;
+boolean launchable = false;
 
 void setup() {
   // Initialize serial connection with sister board
   Serial.begin(115200);
+  #ifdef LAUNCHER_COMMS
+    launcher_serial.begin(115200);
+  #endif
 
   // Setup safety authorization pins
   pinMode(AU1,OUTPUT);
@@ -113,6 +132,7 @@ void setup() {
     parachute_servo.attach(SERVO1);
     lock_parachute();
   #endif
+  launchable = true;
 }
 
 void loop() {
@@ -120,6 +140,7 @@ void loop() {
     int value = analogRead(BATTV);
     float voltage = value / 1023 * BATTERY_NOMINAL; // Calculate voltage on pin
     if(voltage <= BATTERY_THRESHOLD){
+      launchable = false;
       message_status(CRITICAL,CODE_BATTERY);
       #ifdef PARACHUTE_ENABLED
         eject_parachute();
@@ -134,10 +155,33 @@ void loop() {
     message_status(PING,0);
     last_ping = millis();
   }
+  #ifdef LAUNCHER_COMMS
+    if(on_ground){ // Only check comms on ground, no point in the air
+      if(launcher_last_rec != 0 && millis() - launcher_last_rec > 3000){
+        launchable = false;
+        message_status(CRITICAL,CODE_COMMS);
+        while(1){
+          delay(MESSAGE_RETRANSMIT_TIME);
+          message_status(CRITICAL,CODE_COMMS);
+        }
+      }else if(launcher_last_rec == 0 && millis() > 10000){
+        launchable = false;
+        // Failed to start connection with launch controller
+        message_status(CRITICAL,CODE_COMMS);
+        while(1){
+          delay(MESSAGE_RETRANSMIT_TIME);
+          message_status(CRITICAL,CODE_COMMS);
+        }
+      }
+    }
+  #endif
   if(last_rec_ping != 0 && millis() - last_rec_ping > 3000){
+    launchable = false;
     message_status(CRITICAL,CODE_COMMS);
     #ifdef PARACHUTE_ENABLED
-      eject_parachute();
+      if(!on_ground){
+        eject_parachute();
+      }
     #endif
     while(1){
       delay(MESSAGE_RETRANSMIT_TIME);
@@ -145,6 +189,7 @@ void loop() {
     }
   }
   if(last_rec_ping == 0 && millis() > 10000){
+    launchable = false;
     // Flight controller has not been initialized and we've been on for 10s
     message_status(CRITICAL,CODE_COMMS);
     while(1){
@@ -163,6 +208,7 @@ void loop() {
         if(temp == NAN || pres == NAN || pres == 0 || alt == NAN || humid == NAN){
           bme_error = true;
           #ifdef BME_CRITICAL
+            launchable = false;
             message_status(CRITICAL,CODE_HW_BME);
             last_ping = millis();
             #ifdef PARACHUTE_ENABLED
@@ -202,6 +248,7 @@ void loop() {
       if(alt == NAN){
         bme_error = true;
         #ifdef BME_CRITICAL
+          launchable = false;
           message_status(CRITICAL,CODE_HW_BME);
           while(1){
               delay(MESSAGE_RETRANSMIT_TIME);
@@ -223,7 +270,9 @@ void loop() {
       byte message[16];
       if(message_retrieve(message)){ // Make sure checksum is valid
         last_rec_ping = millis();
+        write_data(message,false,true);
         if(message[0] == CRITICAL){
+          launchable = false;
           // An error has occurred with the flight computer, enter safe mode
           // Eject parachute immediately upon error
           #ifdef PARACHUTE_ENABLED
@@ -234,10 +283,41 @@ void loop() {
             if(message[1] == CODE_EJECT_PARACHUTE)
               eject_parachute();
           #endif
+        }else if(message[0] == CHECKSUM){
+          errors++;
         }
+      }else{
+        message_status(CHECKSUM,0);
+        errors++;
+      }
+  }
+  #ifdef LAUNCHER_COMMS
+    if(on_ground && launcher_message_available()){
+      byte message[16];
+      if(launcher_message_retrieve(message)){ // Make sure checksum is valid
+        launcher_last_rec = millis();
+        write_data(message,true,false); // Forward message to flight computer
+        if(message[0] == CRITICAL){
+          launchable = false;
+          while(1); // Just lock up, still on ground
+        }else if(message[0] == QUERY && message[1] == SOURCE_SC){ // Make sure it is destined for the safety computer (us)
+          if(message[1] == QUERY_LAUNCH){
+            message_launchable();
+          }else if(message[2] == QUERY_INFO){
+            message_info();
+          }
+        }else if(message[0] == STATUS){
+          if(message[1] == STATUS_LAUNCH){
+            on_ground = false;
+          }
+        }
+      }else{
+        message_status(CHECKSUM,0);
+        errors++;
       }
     }
-    delay(250);
+  #endif
+  delay(250);
 }
 #ifdef PARACHUTE_ENABLE
   void eject_parachute(){
@@ -260,12 +340,20 @@ void message_status(byte code, byte reason){
   write_data(data);
 }
 void write_data(byte *data){
+  write_data(data,true,true);
+}
+void write_data(byte *data, boolean ser, boolean lau){
   data[14] = SOURCE_SC; // Mark source
   // Calculate checksum
   for(int i = 0; i < 15; i++){
     data[15] += data[i]; // Checksum is sum of bytes
   }
-  Serial.write(data,16);
+  if(ser)
+    Serial.write(data,16);
+  #ifdef LAUNCHER_COMMS
+    if(lau)
+      launcher_serial.write(data,16);
+  #endif
 }
 boolean message_available(){
   return Serial.available() >= 16; // 16 byte data frame
@@ -312,6 +400,47 @@ boolean message_retrieve(byte *buffer){
       else
         data[i+2] = 0;
     }
+    write_data(data);
+  }
+#endif
+void message_info(){
+  byte data[16];
+  for(int i = 0; i < 16; i++)
+    data[i] = 0;
+  data[0] = INFO;
+  data[1] = QUERY_INFO;
+  data[2] = errors;
+  data[3] = parachute_arm | (setup_mode << 1) || (launchable << 2) || (bme_error << 3);
+  data[4] = millis() - last_ping; // Difference between now and last pings to try and fit a long in a byte
+  data[5] = millis() - last_rec_ping;
+  data[6] = millis() - launcher_last_rec;
+  write_data(data);
+}
+#ifdef LAUNCHER_COMMS
+  boolean launcher_message_available(){
+    return launcher_serial.available() >= 16; // 16 byte data frame
+  }
+  boolean launcher_message_retrieve(byte *buffer){
+    byte checksum = 0;
+    for(int i = 0; i < 16; i++){
+      buffer[i] = launcher_serial.read();
+      if(i != 15)
+        checksum += buffer[i];
+    }
+    if(checksum == buffer[15])
+      return true;
+    return false;
+  }
+  void message_launchable(){
+    byte data[16];
+    for(int i = 0; i < 16; i++)
+      data[i] = 0;
+    data[0] = INFO;
+    data[1] = QUERY_LAUNCH;
+    if(launchable)
+      data[2] = STATUS_READY;
+    else
+      data[2] = STATUS_UNREADY;
     write_data(data);
   }
 #endif
