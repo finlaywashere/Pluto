@@ -1,9 +1,9 @@
-#define BME_ENABLE
-#define BME_CRITICAL
-#define SD_ENABLE
-#define SD_CRITICAL
-#define MPU_ENABLE
-#define MPU_CRITICAL
+//#define BME_ENABLE
+//#define BME_CRITICAL
+//#define SD_ENABLE
+//#define SD_CRITICAL
+//#define MPU_ENABLE
+//#define MPU_CRITICAL
 
 #define PARACHUTE_ALT 50
 #define PARACHUTE_ARM 75
@@ -202,6 +202,8 @@ void setup() {
       #endif
     }
   #endif
+  while(Serial.available())
+    Serial.read();
   message_status(STARTUP,0);
 }
 #ifdef MPU_ENABLE
@@ -319,40 +321,39 @@ void loop() {
     delay(750);
   }
   if(message_available()){
-      byte message[16];
-      if(message_retrieve(message)){ // Make sure checksum is valid
-        last_rec_ping = millis();
-        #ifdef SD_ENABLE
-          write_sd_data(message);
-        #endif
-        if(message[0] == CRITICAL){
-          digitalWrite(LED1,HIGH);
-          // An error has occurred with the safety computer, enter safe mode
-          // TODO: Figure out what to do
-          while(1); // Just lock up?
-        }else if(message[0] == CHECKSUM){
-          errors++;
-        }
-      }else{
+    byte message[17];
+    if(message_retrieve(message)){ // Make sure checksum is valid
+      last_rec_ping = millis();
+      #ifdef SD_ENABLE
+        write_sd_data(message);
+      #endif
+      if(message[1] == CRITICAL){
+        digitalWrite(LED1,HIGH);
+        // An error has occurred with the safety computer, enter safe mode
+        // TODO: Figure out what to do
+        while(1); // Just lock up?
+      }else if(message[1] == CHECKSUM){
         errors++;
-        message_status(CHECKSUM,0);
       }
+    }else{
+      errors++;
+      message_status(CHECKSUM,0);
     }
-    delay(250);
+  }
+  delay(250);
 }
 void message_status(byte code, byte reason){
-  byte data[16];
-  data[0] = code;
-  data[1] = reason;
-  for(int i = 2; i < 16; i++){
+  byte data[17];
+  for(int i = 0; i < 17; i++)
     data[i] = 0;
-  }
+  data[1] = code;
+  data[2] = reason;
   write_data(data);
 }
 #ifdef SD_ENABLE
   void write_sd_data(byte *data){
     if(!sd_error){
-      if(data_file.write(data,16) != 16){
+      if(data_file.write(data,17) != 17){
         sd_error = true;
         digitalWrite(LED1,HIGH);
         #ifdef SD_CRITICAL
@@ -369,29 +370,43 @@ void message_status(byte code, byte reason){
   }
 #endif
 void write_data(byte *data){
-  data[14] = SOURCE_FC; // Mark source
+  data[0] = 0xFF; // Start marker
+  data[15] = SOURCE_FC; // Mark source
   // Calculate checksum
-  for(int i = 0; i < 15; i++){
-    data[15] += data[i]; // Checksum is sum of bytes
+  int checksum = 0;
+  for(int i = 0; i < 16; i++){
+    checksum += data[i]; // Checksum is sum of bytes
   }
+  checksum %= 255;
+  data[16] = checksum;
   #ifdef SD_ENABLE
     write_sd_data(data);
   #endif
   last_ping = millis();
-  Serial.write(data,16);
+  int sent = Serial.write(data,17);
+  while(sent < 17){
+    Serial.flush();
+    sent += Serial.write(&data[sent],17-sent);
+  }
+  Serial.flush();
 }
 boolean message_available(){
-  return Serial.available() >= 16; // 16 byte data frame
+  while(Serial.available() && Serial.peek() != 0xFF){
+    Serial.read(); // Clear garbage data
+  }
+  return Serial.available() >= 17; // 16 byte data frame
 }
 boolean message_retrieve(byte *buffer){
-  byte checksum = 0;
-  for(int i = 0; i < 16; i++){
+  for(int i = 0; i < 17; i++)
+    buffer[i] = 0;
+  int checksum = 0;
+  for(int i = 0; i < 17; i++){
     buffer[i] = Serial.read();
-    if(i != 15)
+    if(i != 16)
       checksum += buffer[i];
   }
-  
-  if(checksum == buffer[15])
+  checksum %= 255;
+  if(checksum == buffer[16])
     return true;
   return false;
 }
@@ -402,40 +417,40 @@ boolean message_retrieve(byte *buffer){
     byte *presB = (byte*) &pres;
     byte *altB = (byte*) &alt;
     
-    byte data[16];
-    for(int i = 0; i < 16; i++)
+    byte data[17];
+    for(int i = 0; i < 17; i++)
       data[i] = 0;
-    data[0] = DATA;
-    data[1] = DATA_BME;
+    data[1] = DATA;
+    data[2] = DATA_BME;
     for(int i = 0; i < 12; i++){
       int index = i % 4;
       int var = i / 4;
       if(var == 0)
-        data[i+2] = tempB[index];
+        data[i+3] = tempB[index];
       else if(var == 1)
-        data[i+2] = presB[index];
+        data[i+3] = presB[index];
       else
-        data[i+2] = altB[index];
+        data[i+3] = altB[index];
     }
     write_data(data);
-    data[1] = DATA_BME_EXT;
+    data[2] = DATA_BME_EXT;
     byte *humidB = (byte*) &humid;
     for(int i = 0; i < 12; i++){
       if(i < 4)
-        data[i+2] = humidB[i];
+        data[i+3] = humidB[i];
       else
-        data[i+2] = 0;
+        data[i+3] = 0;
     }
     write_data(data);
   }
 #endif
 #ifdef MPU_ENABLE
   void message_mpu(float yaw, float pitch, float roll, float x, float y, float z){
-    byte data[16];
-    for(int i = 0; i < 16; i++)
+    byte data[17];
+    for(int i = 0; i < 17; i++)
       data[i] = 0;
-    data[0] = DATA;
-    data[1] = DATA_MPU;
+    data[1] = DATA;
+    data[2] = DATA_MPU;
     byte *yawB = (byte*) &yaw;
     byte *pitchB = (byte*) &pitch;
     byte *rollB = (byte*) &roll;
@@ -443,7 +458,7 @@ boolean message_retrieve(byte *buffer){
     byte *yB = (byte*) &y;
     byte *zB = (byte*) &z;
     for(int i = 0; i < 12; i++){
-      int index = i + 2;
+      int index = i + 3;
       int var = i / 4;
       int elem = i % 4;
       if(var == 0)
@@ -454,9 +469,9 @@ boolean message_retrieve(byte *buffer){
         data[index] = rollB[elem];
     }
     write_data(data);
-    data[1] = DATA_MPU_EXT;
+    data[2] = DATA_MPU_EXT;
     for(int i = 0; i < 12; i++){
-      int index = i + 2;
+      int index = i + 3;
       int var = i / 4;
       int elem = i % 4;
       if(var == 0)

@@ -1,10 +1,9 @@
-#define BME_ENABLE
-#define BME_CRITICAL
-#define PARACHUTE_ENABLE
-#define LAUNCHER_COMMS
-#define LAUNCHER_COMMS_CRITICAL
+//#define BME_ENABLE
+//#define BME_CRITICAL
+//#define PARACHUTE_ENABLE
+//#define LAUNCHER_COMMS
 
-#define BATTERY_ENABLE
+//#define BATTERY_ENABLE
 
 #ifdef LAUNCHER_COMMS
   // Note that design does support wireless comms, however its not going to be used for power reasons
@@ -67,7 +66,7 @@
 
 #ifdef LAUNCHER_COMMS
   // Note that these pins will be connected to a RS232 converter because the controller will be too far away for TTL
-  SoftwareSerial launcher_serial (RCE,RCSN); // CE is rx and CSN is tx
+  SoftwareSerial launcher_serial (SERVO5,SERVO6); // SERVO5 is rx and SERVO6 is tx
   long launcher_last_rec = 0;
 #endif
 
@@ -132,6 +131,8 @@ void setup() {
     parachute_servo.attach(SERVO1);
     lock_parachute();
   #endif
+  while(Serial.available())
+    Serial.read();
   launchable = true;
 }
 
@@ -267,47 +268,47 @@ void loop() {
     delay(750);
   }
   if(message_available()){
-      byte message[16];
+      byte message[17];
       if(message_retrieve(message)){ // Make sure checksum is valid
         last_rec_ping = millis();
         write_data(message,false,true);
-        if(message[0] == CRITICAL){
+        if(message[1] == CRITICAL){
           launchable = false;
           // An error has occurred with the flight computer, enter safe mode
           // Eject parachute immediately upon error
           #ifdef PARACHUTE_ENABLED
             eject_parachute();
           #endif
-        }else if(message[0] == ACTION){
+        }else if(message[1] == ACTION){
           #ifdef PARACHUTE_ENABLED
             if(message[1] == CODE_EJECT_PARACHUTE)
               eject_parachute();
           #endif
-        }else if(message[0] == CHECKSUM){
+        }else if(message[1] == CHECKSUM){
           errors++;
         }
       }else{
-        message_status(CHECKSUM,0);
+        message_checksum(message);
         errors++;
       }
   }
   #ifdef LAUNCHER_COMMS
     if(on_ground && launcher_message_available()){
-      byte message[16];
+      byte message[17];
       if(launcher_message_retrieve(message)){ // Make sure checksum is valid
         launcher_last_rec = millis();
         write_data(message,true,false); // Forward message to flight computer
-        if(message[0] == CRITICAL){
+        if(message[1] == CRITICAL){
           launchable = false;
           while(1); // Just lock up, still on ground
-        }else if(message[0] == QUERY && message[1] == SOURCE_SC){ // Make sure it is destined for the safety computer (us)
-          if(message[1] == QUERY_LAUNCH){
+        }else if(message[1] == QUERY && message[2] == SOURCE_SC){ // Make sure it is destined for the safety computer (us)
+          if(message[3] == QUERY_LAUNCH){
             message_launchable();
-          }else if(message[2] == QUERY_INFO){
+          }else if(message[3] == QUERY_INFO){
             message_info();
           }
-        }else if(message[0] == STATUS){
-          if(message[1] == STATUS_LAUNCH){
+        }else if(message[1] == STATUS){
+          if(message[2] == STATUS_LAUNCH){
             on_ground = false;
           }
         }
@@ -334,38 +335,66 @@ void loop() {
   }
 #endif
 void message_status(byte code, byte reason){
-  byte data[16];
-  data[0] = code;
-  data[1] = reason;
+  byte data[17];
+  for(int i = 0; i < 17; i++)
+    data[i] = 0;
+  data[1] = code;
+  data[2] = reason;
   write_data(data);
 }
 void write_data(byte *data){
   write_data(data,true,true);
 }
 void write_data(byte *data, boolean ser, boolean lau){
-  data[14] = SOURCE_SC; // Mark source
-  // Calculate checksum
-  for(int i = 0; i < 15; i++){
-    data[15] += data[i]; // Checksum is sum of bytes
+  data[0] = 0xFF;
+  data[15] = SOURCE_SC; // Mark source
+  int checksum = 0;
+  for(int i = 0; i < 16; i++){
+    checksum += data[i]; // Checksum is sum of bytes
   }
+  checksum %= 255;
+  data[16] = checksum;
   if(ser)
-    Serial.write(data,16);
+    Serial.write(data,17);
   #ifdef LAUNCHER_COMMS
     if(lau)
-      launcher_serial.write(data,16);
+      launcher_serial.write(data,17);
   #endif
 }
+void message_checksum(byte *message){
+  byte expected = message[16];
+  byte actual;
+  for(int i = 0; i < 16; i++)
+    actual += message[i];
+  actual %= 255;
+  byte data[17];
+  for(int i = 0; i < 17; i++)
+    data[i] = 0;
+  data[1] = CHECKSUM;
+  data[2] = expected;
+  data[3] = actual;
+  for(int i = 4; i < 15; i++){
+    data[i] = message[i-3];
+  }
+  write_data(data);
+}
 boolean message_available(){
-  return Serial.available() >= 16; // 16 byte data frame
+  while(Serial.available() && Serial.peek() != 0xFF){
+    Serial.read(); // Clear garbage data
+  }
+  return Serial.available() >= 17; // 16 byte data frame
 }
 boolean message_retrieve(byte *buffer){
-  byte checksum = 0;
-  for(int i = 0; i < 16; i++){
+  for(int i = 0; i < 17; i++)
+    buffer[i] = 0;
+  int checksum = 0;
+  for(int i = 0; i < 17; i++){
     buffer[i] = Serial.read();
-    if(i != 15)
+    if(i != 16)
       checksum += buffer[i];
   }
-  if(checksum == buffer[15])
+  checksum %= 255;
+  if(checksum == buffer[16])
     return true;
   return false;
 }
@@ -376,55 +405,64 @@ boolean message_retrieve(byte *buffer){
     byte *presB = (byte*) &pres;
     byte *altB = (byte*) &alt;
     
-    byte data[16];
-    for(int i = 0; i < 16; i++)
+    byte data[17];
+    for(int i = 0; i < 17; i++)
       data[i] = 0;
-    data[0] = DATA;
-    data[1] = DATA_BME;
+    data[1] = DATA;
+    data[2] = DATA_BME;
     for(int i = 0; i < 12; i++){
       int index = i % 4;
       int var = i / 4;
       if(var == 0)
-        data[i+2] = tempB[index];
+        data[i+3] = tempB[index];
       else if(var == 1)
-        data[i+2] = presB[index];
+        data[i+3] = presB[index];
       else
-        data[i+2] = altB[index];
+        data[i+3] = altB[index];
     }
     write_data(data);
-    data[1] = DATA_BME_EXT;
+    data[2] = DATA_BME_EXT;
     byte *humidB = (byte*) &humid;
     for(int i = 0; i < 12; i++){
       if(i < 4)
-        data[i+2] = humidB[i];
+        data[i+3] = humidB[i];
       else
-        data[i+2] = 0;
+        data[i+3] = 0;
     }
     write_data(data);
   }
 #endif
 void message_info(){
-  byte data[16];
-  for(int i = 0; i < 16; i++)
+  byte data[17];
+  for(int i = 0; i < 17; i++)
     data[i] = 0;
-  data[0] = INFO;
-  data[1] = QUERY_INFO;
-  data[2] = errors;
-  data[3] = parachute_arm | (setup_mode << 1) || (launchable << 2) || (bme_error << 3);
-  data[4] = millis() - last_ping; // Difference between now and last pings to try and fit a long in a byte
-  data[5] = millis() - last_rec_ping;
-  data[6] = millis() - launcher_last_rec;
+  data[1] = INFO;
+  data[2] = QUERY_INFO;
+  data[3] = errors;
+  #ifdef PARACHUTE_ENABLE
+  data[4] = parachute_arm | (setup_mode << 1) || (launchable << 2);
+  #else
+  data[4] = (setup_mode << 1) || (launchable << 2);
+  #endif
+  #ifdef BME_ENABLE
+    data[4] |= bme_error << 3;
+  #endif
+  data[5] = millis() - last_ping; // Difference between now and last pings to try and fit a long in a byte
+  data[6] = millis() - last_rec_ping;
+  #ifdef LAUNCHER_COMMS
+    data[7] = millis() - launcher_last_rec;
+  #endif
   write_data(data);
 }
 #ifdef LAUNCHER_COMMS
   boolean launcher_message_available(){
-    return launcher_serial.available() >= 16; // 16 byte data frame
+    return launcher_serial.available() >= 17; // 16 byte data frame
   }
   boolean launcher_message_retrieve(byte *buffer){
     byte checksum = 0;
-    for(int i = 0; i < 16; i++){
+    for(int i = 0; i < 17; i++){
       buffer[i] = launcher_serial.read();
-      if(i != 15)
+      if(i != 16)
         checksum += buffer[i];
     }
     if(checksum == buffer[15])
@@ -432,15 +470,15 @@ void message_info(){
     return false;
   }
   void message_launchable(){
-    byte data[16];
-    for(int i = 0; i < 16; i++)
+    byte data[17];
+    for(int i = 0; i < 17; i++)
       data[i] = 0;
-    data[0] = INFO;
-    data[1] = QUERY_LAUNCH;
+    data[1] = INFO;
+    data[2] = QUERY_LAUNCH;
     if(launchable)
-      data[2] = STATUS_READY;
+      data[3] = STATUS_READY;
     else
-      data[2] = STATUS_UNREADY;
+      data[3] = STATUS_UNREADY;
     write_data(data);
   }
 #endif

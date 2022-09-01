@@ -1,4 +1,3 @@
-#define NOMINAL 0
 #define ERROR 1
 #define WARNING 2
 #define DEBUG 3
@@ -12,7 +11,7 @@
 #define STATUS 11
 #define INFO 12
 
-#define SOURCE_FC 0 // Flight computer
+#define SOURCE_FC 3 // Flight computer
 #define SOURCE_SC 1 // Safety computer
 #define SOURCE_LC 2 // Launch computer
 
